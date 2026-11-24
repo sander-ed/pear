@@ -1,6 +1,6 @@
 [package]
 name = "pear"
-version = "0.2.1"
+version = "0.2.2"
 edition = "2024"
 description = "Tiny session manager: keep a terminal program running independently of your SSH session"
 license = "MIT"
