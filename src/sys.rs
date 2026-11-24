@@ -15,7 +15,11 @@ pub fn set_nonblocking(fd: RawFd, on: bool) -> io::Result<()> {
         if flags < 0 {
             return Err(errno());
         }
-        let flags = if on { flags | libc::O_NONBLOCK } else { flags & !libc::O_NONBLOCK };
+        let flags = if on {
+            flags | libc::O_NONBLOCK
+        } else {
+            flags & !libc::O_NONBLOCK
+        };
         if libc::fcntl(fd, libc::F_SETFL, flags) < 0 {
             return Err(errno());
         }
@@ -42,7 +46,7 @@ pub fn close(fd: RawFd) {
 /// Read into `buf`. Returns Ok(0) on EOF, Err(WouldBlock) if nothing is ready.
 pub fn read(fd: RawFd, buf: &mut [u8]) -> io::Result<usize> {
     loop {
-        let n = unsafe { libc::read(fd, buf.as_mut_ptr() as *mut _, buf.len()) };
+        let n = unsafe { libc::read(fd, buf.as_mut_ptr().cast(), buf.len()) };
         if n >= 0 {
             return Ok(n as usize);
         }
@@ -56,7 +60,7 @@ pub fn read(fd: RawFd, buf: &mut [u8]) -> io::Result<usize> {
 /// Single write attempt. Err(WouldBlock) on non-blocking fds that are full.
 pub fn write(fd: RawFd, buf: &[u8]) -> io::Result<usize> {
     loop {
-        let n = unsafe { libc::write(fd, buf.as_ptr() as *const _, buf.len()) };
+        let n = unsafe { libc::write(fd, buf.as_ptr().cast(), buf.len()) };
         if n >= 0 {
             return Ok(n as usize);
         }
@@ -73,7 +77,11 @@ pub fn write_all(fd: RawFd, mut buf: &[u8]) -> io::Result<()> {
         match write(fd, buf) {
             Ok(n) => buf = &buf[n..],
             Err(e) if e.kind() == io::ErrorKind::WouldBlock => {
-                let mut pfd = [libc::pollfd { fd, events: libc::POLLOUT, revents: 0 }];
+                let mut pfd = [libc::pollfd {
+                    fd,
+                    events: libc::POLLOUT,
+                    revents: 0,
+                }];
                 poll(&mut pfd, -1)?;
             }
             Err(e) => return Err(e),
@@ -123,16 +131,27 @@ impl Default for WinSize {
 
 pub fn get_winsize(fd: RawFd) -> Option<WinSize> {
     let mut ws: libc::winsize = unsafe { std::mem::zeroed() };
-    if unsafe { libc::ioctl(fd, libc::TIOCGWINSZ, &mut ws) } < 0 || ws.ws_col == 0 || ws.ws_row == 0 {
+    if unsafe { libc::ioctl(fd, libc::TIOCGWINSZ, &raw mut ws) } < 0
+        || ws.ws_col == 0
+        || ws.ws_row == 0
+    {
         return None;
     }
-    Some(WinSize { cols: ws.ws_col, rows: ws.ws_row })
+    Some(WinSize {
+        cols: ws.ws_col,
+        rows: ws.ws_row,
+    })
 }
 
 pub fn set_winsize(fd: RawFd, size: WinSize) {
-    let ws = libc::winsize { ws_row: size.rows, ws_col: size.cols, ws_xpixel: 0, ws_ypixel: 0 };
+    let ws = libc::winsize {
+        ws_row: size.rows,
+        ws_col: size.cols,
+        ws_xpixel: 0,
+        ws_ypixel: 0,
+    };
     unsafe {
-        libc::ioctl(fd, libc::TIOCSWINSZ, &ws);
+        libc::ioctl(fd, libc::TIOCSWINSZ, &raw const ws);
     }
 }
 
@@ -151,14 +170,14 @@ pub struct RawMode {
 impl RawMode {
     pub fn enable(fd: RawFd) -> io::Result<RawMode> {
         let mut saved: libc::termios = unsafe { std::mem::zeroed() };
-        if unsafe { libc::tcgetattr(fd, &mut saved) } < 0 {
+        if unsafe { libc::tcgetattr(fd, &raw mut saved) } < 0 {
             return Err(errno());
         }
         let mut raw = saved;
-        unsafe { libc::cfmakeraw(&mut raw) };
+        unsafe { libc::cfmakeraw(&raw mut raw) };
         raw.c_cc[libc::VMIN] = 1;
         raw.c_cc[libc::VTIME] = 0;
-        if unsafe { libc::tcsetattr(fd, libc::TCSANOW, &raw) } < 0 {
+        if unsafe { libc::tcsetattr(fd, libc::TCSANOW, &raw const raw) } < 0 {
             return Err(errno());
         }
         Ok(RawMode { fd, saved })
@@ -166,7 +185,7 @@ impl RawMode {
 
     pub fn restore(&self) {
         unsafe {
-            libc::tcsetattr(self.fd, libc::TCSANOW, &self.saved);
+            libc::tcsetattr(self.fd, libc::TCSANOW, &raw const self.saved);
         }
     }
 }
@@ -187,7 +206,7 @@ extern "C" fn on_signal(sig: libc::c_int) {
     if fd >= 0 {
         let b = [sig as u8];
         unsafe {
-            libc::write(fd, b.as_ptr() as *const _, 1);
+            libc::write(fd, b.as_ptr().cast(), 1);
         }
     }
 }
@@ -203,8 +222,8 @@ pub fn signal_pipe(signals: &[libc::c_int]) -> io::Result<RawFd> {
             let mut sa: libc::sigaction = std::mem::zeroed();
             sa.sa_sigaction = on_signal as extern "C" fn(libc::c_int) as usize;
             sa.sa_flags = libc::SA_RESTART;
-            libc::sigemptyset(&mut sa.sa_mask);
-            if libc::sigaction(sig, &sa, std::ptr::null_mut()) < 0 {
+            libc::sigemptyset(&raw mut sa.sa_mask);
+            if libc::sigaction(sig, &raw const sa, std::ptr::null_mut()) < 0 {
                 return Err(errno());
             }
         }
@@ -239,7 +258,10 @@ fn sockaddr_un(path: &str) -> io::Result<(libc::sockaddr_un, libc::socklen_t)> {
     addr.sun_family = libc::AF_UNIX as libc::sa_family_t;
     let bytes = path.as_bytes();
     if bytes.len() >= addr.sun_path.len() {
-        return Err(io::Error::new(io::ErrorKind::InvalidInput, "socket path too long"));
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "socket path too long",
+        ));
     }
     for (dst, &src) in addr.sun_path.iter_mut().zip(bytes) {
         *dst = src as libc::c_char;
@@ -257,10 +279,27 @@ fn unix_socket() -> io::Result<RawFd> {
     Ok(fd)
 }
 
+/// Make blocking reads/writes on `fd` fail with `WouldBlock` after `t`.
+pub fn set_timeouts(fd: RawFd, t: std::time::Duration) -> io::Result<()> {
+    let tv = libc::timeval {
+        tv_sec: libc::time_t::try_from(t.as_secs()).unwrap_or(libc::time_t::MAX),
+        tv_usec: libc::suseconds_t::try_from(t.subsec_micros()).unwrap_or(0),
+    };
+    #[allow(clippy::cast_possible_truncation)]
+    let len = std::mem::size_of::<libc::timeval>() as libc::socklen_t;
+    for opt in [libc::SO_RCVTIMEO, libc::SO_SNDTIMEO] {
+        let r = unsafe { libc::setsockopt(fd, libc::SOL_SOCKET, opt, (&raw const tv).cast(), len) };
+        if r < 0 {
+            return Err(errno());
+        }
+    }
+    Ok(())
+}
+
 pub fn unix_listen(path: &str) -> io::Result<RawFd> {
     let fd = unix_socket()?;
     let (addr, len) = sockaddr_un(path)?;
-    let r = unsafe { libc::bind(fd, &addr as *const _ as *const libc::sockaddr, len) };
+    let r = unsafe { libc::bind(fd, (&raw const addr).cast::<libc::sockaddr>(), len) };
     if r < 0 {
         let e = errno();
         close(fd);
@@ -277,7 +316,7 @@ pub fn unix_listen(path: &str) -> io::Result<RawFd> {
 pub fn unix_connect(path: &str) -> io::Result<RawFd> {
     let fd = unix_socket()?;
     let (addr, len) = sockaddr_un(path)?;
-    let r = unsafe { libc::connect(fd, &addr as *const _ as *const libc::sockaddr, len) };
+    let r = unsafe { libc::connect(fd, (&raw const addr).cast::<libc::sockaddr>(), len) };
     if r < 0 {
         let e = errno();
         close(fd);
@@ -327,7 +366,11 @@ pub fn detach_stdio(log: Option<&str>) {
             }
         }
         if let Some(c) = log.and_then(|p| CString::new(p).ok()) {
-            let lfd = libc::open(c.as_ptr(), libc::O_WRONLY | libc::O_CREAT | libc::O_APPEND, 0o600);
+            let lfd = libc::open(
+                c.as_ptr(),
+                libc::O_WRONLY | libc::O_CREAT | libc::O_APPEND,
+                0o600,
+            );
             if lfd >= 0 {
                 libc::dup2(lfd, 2);
                 libc::close(lfd);
@@ -338,4 +381,10 @@ pub fn detach_stdio(log: Option<&str>) {
 
 pub fn getuid() -> u32 {
     unsafe { libc::getuid() }
+}
+
+pub fn set_umask(mask: libc::mode_t) {
+    unsafe {
+        libc::umask(mask);
+    }
 }

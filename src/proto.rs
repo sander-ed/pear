@@ -66,7 +66,10 @@ impl Decoder {
         let kind = self.buf[0];
         let len = u32::from_le_bytes([self.buf[1], self.buf[2], self.buf[3], self.buf[4]]) as usize;
         if len > MAX_FRAME {
-            return Err(io::Error::new(io::ErrorKind::InvalidData, "frame too large"));
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "frame too large",
+            ));
         }
         if self.buf.len() < 5 + len {
             return Ok(None);
@@ -91,7 +94,10 @@ pub fn recv(fd: RawFd, dec: &mut Decoder) -> io::Result<(u8, Vec<u8>)> {
         }
         let n = sys::read(fd, &mut buf)?;
         if n == 0 {
-            return Err(io::Error::new(io::ErrorKind::UnexpectedEof, "connection closed"));
+            return Err(io::Error::new(
+                io::ErrorKind::UnexpectedEof,
+                "connection closed",
+            ));
         }
         dec.push(&buf[..n]);
     }

@@ -94,6 +94,9 @@ for pair in "${TARGETS[@]}"; do
   if [[ "$target" == "$(uname -m | sed 's/arm64/aarch64/')-apple-darwin" ]]; then
     step "Testing $target"
     GHOSTTY_VT_DIR="$cache/$zig_target" cargo +stable test --release --locked --target "$target"
+    rustup component add --toolchain stable clippy rustfmt > /dev/null
+    cargo +stable fmt --check || die "run cargo fmt"
+    GHOSTTY_VT_DIR="$cache/$zig_target" cargo +stable clippy --locked --all-targets --target "$target" -- -D warnings
     expect tests/e2e.exp "$binary" > /dev/null || die "end-to-end test failed (rerun: expect tests/e2e.exp $binary)"
   fi
 

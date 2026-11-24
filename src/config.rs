@@ -17,7 +17,9 @@ pub struct Config {
 
 impl Default for Config {
     fn default() -> Self {
-        Config { detach_key: parse_key("C-a d").unwrap() }
+        Config {
+            detach_key: parse_key("C-a d").unwrap(),
+        }
     }
 }
 
@@ -36,28 +38,58 @@ pub fn load() -> Result<Config, String> {
         return Ok(cfg);
     };
     for (lineno, raw) in text.lines().enumerate() {
-        let line = raw.trim();
-        if line.is_empty() || line.starts_with('#') {
+        let line = strip_comment(raw).trim();
+        if line.is_empty() {
             continue;
         }
         let Some((k, v)) = line.split_once('=') else {
-            return Err(format!("{}:{}: expected `key = value`", path.display(), lineno + 1));
+            return Err(format!(
+                "{}:{}: expected `key = value`",
+                path.display(),
+                lineno + 1
+            ));
         };
-        let (k, v) = (k.trim(), v.trim().trim_matches('"'));
+        let v = v.trim();
+        let v = v
+            .strip_prefix('"')
+            .and_then(|v| v.strip_suffix('"'))
+            .unwrap_or(v);
+        let k = k.trim();
         match k {
-            "detach-key" => cfg.detach_key = parse_key(v).map_err(|e| format!("{}:{}: {e}", path.display(), lineno + 1))?,
-            _ => return Err(format!("{}:{}: unknown option `{k}`", path.display(), lineno + 1)),
+            "detach-key" => {
+                cfg.detach_key =
+                    parse_key(v).map_err(|e| format!("{}:{}: {e}", path.display(), lineno + 1))?
+            }
+            _ => {
+                return Err(format!(
+                    "{}:{}: unknown option `{k}`",
+                    path.display(),
+                    lineno + 1
+                ));
+            }
         }
     }
     Ok(cfg)
 }
 
+/// Remove a `#` comment: a whole line, or ` # ...` after a value.
+fn strip_comment(line: &str) -> &str {
+    let t = line.trim_start();
+    if t.starts_with('#') {
+        return "";
+    }
+    match line.find(" #").or_else(|| line.find("\t#")) {
+        Some(i) => &line[..i],
+        None => line,
+    }
+}
+
 /// Directory holding the per-session sockets.
 pub fn session_dir() -> PathBuf {
-    if let Some(d) = std::env::var_os("PEAR_DIR") {
+    if let Some(d) = std::env::var_os("PEAR_DIR").filter(|d| !d.is_empty()) {
         return PathBuf::from(d);
     }
-    if let Some(d) = std::env::var_os("XDG_RUNTIME_DIR") {
+    if let Some(d) = std::env::var_os("XDG_RUNTIME_DIR").filter(|d| !d.is_empty()) {
         return PathBuf::from(d).join("pear");
     }
     PathBuf::from(format!("/tmp/pear-{}", crate::sys::getuid()))
@@ -87,11 +119,21 @@ fn parse_token(tok: &str) -> Result<Vec<u8>, String> {
         "bs" | "backspace" => return Ok(vec![0x7f]),
         _ => {}
     }
-    if let Some(rest) = tok.strip_prefix("C-").or_else(|| tok.strip_prefix("c-")).or_else(|| tok.strip_prefix('^')) {
+    if let Some(rest) = tok
+        .strip_prefix("C-")
+        .or_else(|| tok.strip_prefix("c-"))
+        .or_else(|| tok.strip_prefix('^'))
+    {
         let c = single_char(rest)?;
-        return ctrl(c).map(|b| vec![b]).ok_or_else(|| format!("cannot Ctrl-modify `{rest}`"));
+        return ctrl(c)
+            .map(|b| vec![b])
+            .ok_or_else(|| format!("cannot Ctrl-modify `{rest}`"));
     }
-    if let Some(rest) = tok.strip_prefix("M-").or_else(|| tok.strip_prefix("m-")).or_else(|| tok.strip_prefix("A-")) {
+    if let Some(rest) = tok
+        .strip_prefix("M-")
+        .or_else(|| tok.strip_prefix("m-"))
+        .or_else(|| tok.strip_prefix("A-"))
+    {
         let c = single_char(rest)?;
         return Ok(vec![0x1b, c as u8]);
     }
@@ -169,5 +211,15 @@ mod tests {
         assert!(parse_key("foo").is_err());
         assert_eq!(describe_key(&[1, b'd']), "C-a d");
         assert_eq!(describe_key(&[0x1c]), "C-\\");
+    }
+
+    #[test]
+    fn comments() {
+        assert_eq!(
+            strip_comment("detach-key = C-a d # note"),
+            "detach-key = C-a d"
+        );
+        assert_eq!(strip_comment("  # whole line"), "");
+        assert_eq!(strip_comment("detach-key = C-\\"), "detach-key = C-\\");
     }
 }

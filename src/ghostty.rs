@@ -92,15 +92,27 @@ unsafe extern "C" {
         cell_width_px: u32,
         cell_height_px: u32,
     ) -> GhosttyResult;
-    pub fn ghostty_terminal_set(terminal: GhosttyTerminal, option: c_int, value: *const c_void) -> GhosttyResult;
-    pub fn ghostty_terminal_get(terminal: GhosttyTerminal, data: c_int, out: *mut c_void) -> GhosttyResult;
+    pub fn ghostty_terminal_set(
+        terminal: GhosttyTerminal,
+        option: c_int,
+        value: *const c_void,
+    ) -> GhosttyResult;
+    pub fn ghostty_terminal_get(
+        terminal: GhosttyTerminal,
+        data: c_int,
+        out: *mut c_void,
+    ) -> GhosttyResult;
 
     pub fn ghostty_formatter_terminal_new(
         allocator: *const GhosttyAllocator,
         formatter: *mut GhosttyFormatter,
         terminal: GhosttyTerminal,
     ) -> GhosttyResult;
-    pub fn ghostty_formatter_set(formatter: GhosttyFormatter, option: c_int, value: *const c_void) -> GhosttyResult;
+    pub fn ghostty_formatter_set(
+        formatter: GhosttyFormatter,
+        option: c_int,
+        value: *const c_void,
+    ) -> GhosttyResult;
     pub fn ghostty_formatter_format_alloc(
         formatter: GhosttyFormatter,
         allocator: *const GhosttyAllocator,

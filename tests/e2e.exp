@@ -115,5 +115,69 @@ send "\033:q!\r"
 expect "exited with status 0"
 wait
 
+# 10. bare `pear` creates numbered sessions 1, 2, ...
+spawn $pear
+expect {
+    "attached to 1" {}
+    timeout { fail "bare pear did not create session 1" }
+}
+expect "PROMPT>"
+send "\001d"
+expect "detached from 1"
+wait
+
+# 11. detach works while the program uses the kitty keyboard protocol
+# (Ctrl-a arrives as ESC [ 97 ; 5 u, like inside GitHub Copilot CLI)
+spawn $pear
+expect {
+    "attached to 2" {}
+    timeout { fail "bare pear did not create session 2" }
+}
+expect "PROMPT>"
+send "printf '\\033\[>1u'; sleep 30\r"
+sleep 0.5
+send "\033\[97;5ud"
+expect {
+    "detached from 2" {}
+    timeout { fail "kitty-encoded C-a d did not detach" }
+}
+wait
+
+# 12. options after the subcommand; no orphan session when attach is impossible
+spawn $pear new -d t3 /bin/sh -c "sleep 100"
+expect {
+    "created t3" {}
+    timeout { fail "new -d NAME did not create t3" }
+}
+wait
+spawn sh -c "$pear new t4 /bin/sh < /dev/null"
+expect {
+    "must be a terminal" {}
+    timeout { fail "no tty error" }
+}
+wait
+spawn $pear ls
+expect {
+    -re "1\t.*\n2\t.*\nt3\t" {}
+    timeout { fail "unexpected session list" }
+}
+wait
+foreach s {1 2 t3} {
+    spawn $pear kill $s
+    expect "killed $s"
+    wait
+}
+
+# 13. kill while the program floods output must not hang
+spawn $pear new -d f /bin/sh -c "yes"
+expect "created f"
+wait
+spawn $pear kill f
+expect {
+    "killed f" {}
+    timeout { fail "kill hung on a busy session" }
+}
+wait
+
 file delete -force $env(PEAR_DIR)
 puts "\nALL OK"

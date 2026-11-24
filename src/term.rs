@@ -21,18 +21,22 @@ pub trait Screen {
 /// Put the client's terminal in a known, sane state before repainting / after detaching.
 pub fn sane_terminal() -> &'static [u8] {
     concat!(
-        "\x1b[0m",      // reset SGR
-        "\x1b[?1049l",  // leave alternate screen
-        "\x1b[?25h",    // cursor visible
-        "\x1b[?1l",     // normal cursor keys
-        "\x1b>",        // normal keypad
-        "\x1b[?7h",     // autowrap on
+        "\x1b[0m",                                                            // reset SGR
+        "\x1b[?1049l", // leave alternate screen
+        "\x1b[?25h",   // cursor visible
+        "\x1b[?1l",    // normal cursor keys
+        "\x1b>",       // normal keypad
+        "\x1b[?7h",    // autowrap on
         "\x1b[?1000l\x1b[?1002l\x1b[?1003l\x1b[?1005l\x1b[?1006l\x1b[?1016l", // mouse off
-        "\x1b[?1004l",  // focus events off
-        "\x1b[?2004l",  // bracketed paste off
-        "\x1b[?2026l",  // synchronized output off
-        "\x1b[<u",      // pop kitty keyboard flags (if any)
-        "\x1b[r",       // reset scroll region
+        "\x1b[?1004l", // focus events off
+        "\x1b[?2004l", // bracketed paste off
+        "\x1b[?2026l", // synchronized output off
+        "\x1b[=0;1u",  // kitty keyboard flags off...
+        "\x1b[<99u",   // ...and pop everything the program pushed
+        "\x1b[>4m",    // xterm modifyOtherKeys off
+        // Reset the scroll region. DECSTBM also homes the cursor, so save and
+        // restore it: messages printed after detaching belong below the output.
+        "\x1b7\x1b[r\x1b8",
     )
     .as_bytes()
 }
@@ -58,7 +62,10 @@ pub struct RingScreen {
 
 impl RingScreen {
     pub fn new(_size: WinSize) -> Self {
-        RingScreen { buf: Vec::new(), cap: 256 * 1024 }
+        RingScreen {
+            buf: Vec::new(),
+            cap: 256 * 1024,
+        }
     }
 }
 
@@ -87,7 +94,7 @@ impl Screen for RingScreen {
 
 #[cfg(feature = "ghostty")]
 pub mod ghostty {
-    use super::{sane_terminal, Screen};
+    use super::{Screen, sane_terminal};
     use crate::ghostty::*;
     use crate::sys::WinSize;
     use std::ffi::c_void;
@@ -103,29 +110,47 @@ pub mod ghostty {
     // The terminal is only ever touched from the server's single thread.
     unsafe impl Send for GhosttyScreen {}
 
-    unsafe extern "C" fn write_pty_cb(_t: GhosttyTerminal, userdata: *mut c_void, data: *const u8, len: usize) {
+    unsafe extern "C" fn write_pty_cb(
+        _t: GhosttyTerminal,
+        userdata: *mut c_void,
+        data: *const u8,
+        len: usize,
+    ) {
         if userdata.is_null() || data.is_null() {
             return;
         }
-        let pending = unsafe { &mut *(userdata as *mut Vec<u8>) };
+        let pending = unsafe { &mut *userdata.cast::<Vec<u8>>() };
         pending.extend_from_slice(unsafe { std::slice::from_raw_parts(data, len) });
     }
 
     impl GhosttyScreen {
         pub fn new(size: WinSize) -> Result<Self, String> {
             let mut term: GhosttyTerminal = std::ptr::null_mut();
-            let r = unsafe { ghostty_terminal_new(std::ptr::null(), &mut term, size.cols, size.rows) };
+            let r = unsafe {
+                ghostty_terminal_new(std::ptr::null(), &raw mut term, size.cols, size.rows)
+            };
             if r != GHOSTTY_SUCCESS || term.is_null() {
                 return Err(format!("ghostty_terminal_new: {r}"));
             }
-            let mut s = GhosttyScreen { term, pending: Box::new(Vec::new()) };
+            let mut s = GhosttyScreen {
+                term,
+                pending: Box::new(Vec::new()),
+            };
             unsafe {
                 let ud: *mut Vec<u8> = &mut *s.pending;
-                ghostty_terminal_set(term, GHOSTTY_TERMINAL_OPT_USERDATA, ud as *const c_void);
-                ghostty_terminal_set(term, GHOSTTY_TERMINAL_OPT_WRITE_PTY, write_pty_cb as *const c_void);
+                ghostty_terminal_set(term, GHOSTTY_TERMINAL_OPT_USERDATA, ud.cast_const().cast());
+                ghostty_terminal_set(
+                    term,
+                    GHOSTTY_TERMINAL_OPT_WRITE_PTY,
+                    write_pty_cb as *const c_void,
+                );
                 // We only need the visible screen; keep memory small.
                 let lines: usize = 0;
-                ghostty_terminal_set(term, GHOSTTY_TERMINAL_OPT_SCROLLBACK_MAX_LINES, &lines as *const _ as *const c_void);
+                ghostty_terminal_set(
+                    term,
+                    GHOSTTY_TERMINAL_OPT_SCROLLBACK_MAX_LINES,
+                    (&raw const lines).cast(),
+                );
             }
             Ok(s)
         }
@@ -133,13 +158,24 @@ pub mod ghostty {
         #[cfg(test)]
         fn alt_screen_active(&self) -> bool {
             let mut v: i32 = GHOSTTY_TERMINAL_SCREEN_PRIMARY;
-            unsafe { ghostty_terminal_get(self.term, GHOSTTY_TERMINAL_DATA_ACTIVE_SCREEN, &mut v as *mut _ as *mut c_void) };
+            unsafe {
+                ghostty_terminal_get(
+                    self.term,
+                    GHOSTTY_TERMINAL_DATA_ACTIVE_SCREEN,
+                    (&raw mut v).cast(),
+                )
+            };
             v == GHOSTTY_TERMINAL_SCREEN_ALTERNATE
         }
 
         fn mode(&self, n: u16) -> Option<bool> {
-            let mut cfg = GhosttyTerminalModeConfig { mode: dec_mode(n), value: false };
-            let r = unsafe { ghostty_terminal_get(self.term, GHOSTTY_TERMINAL_DATA_MODE, &mut cfg as *mut _ as *mut c_void) };
+            let mut cfg = GhosttyTerminalModeConfig {
+                mode: dec_mode(n),
+                value: false,
+            };
+            let r = unsafe {
+                ghostty_terminal_get(self.term, GHOSTTY_TERMINAL_DATA_MODE, (&raw mut cfg).cast())
+            };
             (r == GHOSTTY_SUCCESS).then_some(cfg.value)
         }
 
@@ -147,13 +183,15 @@ pub mod ghostty {
             let mut f: GhosttyFormatter = std::ptr::null_mut();
             let mut out = Vec::new();
             unsafe {
-                if ghostty_formatter_terminal_new(std::ptr::null(), &mut f, self.term) != GHOSTTY_SUCCESS {
+                if ghostty_formatter_terminal_new(std::ptr::null(), &raw mut f, self.term)
+                    != GHOSTTY_SUCCESS
+                {
                     return out;
                 }
                 let emit = GHOSTTY_FORMATTER_FORMAT_VT;
-                ghostty_formatter_set(f, GHOSTTY_FORMATTER_OPT_EMIT, &emit as *const _ as *const c_void);
+                ghostty_formatter_set(f, GHOSTTY_FORMATTER_OPT_EMIT, (&raw const emit).cast());
                 let trim = false;
-                ghostty_formatter_set(f, GHOSTTY_FORMATTER_OPT_TRIM, &trim as *const _ as *const c_void);
+                ghostty_formatter_set(f, GHOSTTY_FORMATTER_OPT_TRIM, (&raw const trim).cast());
                 // Not PALETTE: that would overwrite the user's terminal colors with ghostty's
                 // defaults. Not PWD: OSC 7 would make the client's terminal think it changed dir.
                 let extras: u32 = EXTRA_MODES
@@ -166,10 +204,13 @@ pub mod ghostty {
                     | EXTRA_PROTECTION
                     | EXTRA_KITTY_KEYBOARD
                     | EXTRA_CHARSETS;
-                ghostty_formatter_set(f, GHOSTTY_FORMATTER_OPT_EXTRAS, &extras as *const _ as *const c_void);
+                ghostty_formatter_set(f, GHOSTTY_FORMATTER_OPT_EXTRAS, (&raw const extras).cast());
                 let mut ptr: *mut u8 = std::ptr::null_mut();
                 let mut len: usize = 0;
-                if ghostty_formatter_format_alloc(f, std::ptr::null(), &mut ptr, &mut len) == GHOSTTY_SUCCESS && !ptr.is_null() {
+                if ghostty_formatter_format_alloc(f, std::ptr::null(), &raw mut ptr, &raw mut len)
+                    == GHOSTTY_SUCCESS
+                    && !ptr.is_null()
+                {
                     out.extend_from_slice(std::slice::from_raw_parts(ptr, len));
                     ghostty_free(std::ptr::null(), ptr, len);
                 }

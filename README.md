@@ -26,31 +26,43 @@ musl), plus `SHA256SUMS`.
 ## Usage
 
 ```
-pear                         list sessions
+pear                         start a new session named 1, 2, 3, ... and attach
 pear NAME [CMD...]           attach to NAME, or create it if it doesn't exist
-pear new NAME [CMD...]       create a session running CMD (default: $SHELL) and attach
-pear new -d NAME [CMD...]    create without attaching
+pear new [NAME] [CMD...]     create a session running CMD (default: $SHELL) and attach
+pear new -d [NAME] [CMD...]  create without attaching
 pear attach NAME             attach to an existing session
 pear ls                      list sessions
 pear kill NAME               terminate the program running in NAME
 ```
 
+Like tmux, a bare `pear` takes the lowest free number, so with sessions `1`
+and `3` running the next one is `2`. When `pear` is not run in a terminal
+(for example piped into another command), it lists sessions instead.
+
 Detach with **Ctrl-a d** (default). Change it per invocation with
 `-k`/`--detach-key`, or permanently in `~/.config/pear/config`:
 
 ```
-detach-key = C-\
+detach-key = C-\    # comments are allowed after a value
 ```
 
 Key syntax: `C-x` = Ctrl+x, `M-x` = Alt+x, plain characters are literal,
 multiple tokens separated by spaces form a sequence (`C-a d`, `C-a C-d`).
+
+The detach key always wins, like tmux's prefix. pear decodes your keystrokes
+itself, so it still detaches when the program has switched your terminal to the
+kitty keyboard protocol or xterm's modifyOtherKeys. GitHub Copilot CLI, Claude
+Code, and other TUIs do this, and in those modes Ctrl-a is no longer the byte
+`0x01`. Pasted text never triggers a detach. Ctrl-a followed by any other key
+is passed through, so Ctrl-a still works as "beginning of line".
 
 When the program exits, every attached `pear` exits with the same status and
 the session disappears. If the SSH connection drops, the session keeps running;
 just `pear NAME` again.
 
 Sockets live in `$XDG_RUNTIME_DIR/pear/` or `/tmp/pear-$UID/` (`PEAR_DIR` overrides).
-The environment variable `PEAR` is set to the session name inside the program.
+Inside a session, `PEAR` holds the session name and `PEAR_SOCKET` holds the
+socket path. pear uses them to refuse attaching a session to itself.
 
 ## Building
 
@@ -83,7 +95,9 @@ attached client over a unix socket. On attach, the server asks libghostty-vt to
 serialize the current screen (contents, styles, cursor, alternate screen, mouse and
 paste modes, ...) as VT sequences and sends that first. Resizes are propagated with
 `TIOCSWINSZ`. While nobody is attached the server answers terminal queries (DSR,
-DA) itself so programs don't hang.
+DA) itself so programs don't hang. A client that falls more than 4 MB behind
+(a slow SSH link during heavy output) skips the backlog and gets a fresh screen
+snapshot instead of being disconnected.
 
 Wire protocol: `[type u8][len u32 LE][payload]`. See `src/proto.rs`.
 
@@ -91,6 +105,8 @@ Wire protocol: `[type u8][len u32 LE][payload]`. See `src/proto.rs`.
 
 ```sh
 PKG_CONFIG_PATH="$HOME/.local/lib/pkgconfig" cargo test
+cargo clippy --all-targets -- -D warnings
+cargo fmt --check
 expect tests/e2e.exp target/release/pear   # end-to-end on a real pty
 ```
 

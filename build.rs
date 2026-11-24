@@ -18,11 +18,11 @@ fn main() {
         .cargo_metadata(false)
         .probe("libghostty-vt-static")
     {
-        let libdir = lib
-            .link_paths
-            .first()
-            .cloned()
-            .or_else(|| pkg_config::get_variable("libghostty-vt-static", "libdir").ok().map(Into::into));
+        let libdir = lib.link_paths.first().cloned().or_else(|| {
+            pkg_config::get_variable("libghostty-vt-static", "libdir")
+                .ok()
+                .map(Into::into)
+        });
         if let Some(libdir) = libdir.filter(|d| d.join("libghostty-vt.a").exists()) {
             link_static(&libdir);
             return;
@@ -56,5 +56,8 @@ fn main() {
 fn link_static(libdir: &std::path::Path) {
     // Pass the archive by full path: on macOS `-lghostty-vt` would prefer the
     // .dylib sitting next to the .a, and we want a self-contained binary.
-    println!("cargo:rustc-link-arg={}", libdir.join("libghostty-vt.a").display());
+    println!(
+        "cargo:rustc-link-arg={}",
+        libdir.join("libghostty-vt.a").display()
+    );
 }

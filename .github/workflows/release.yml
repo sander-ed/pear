@@ -52,9 +52,15 @@ jobs:
           test "v$version" = "$TAG" || { echo "::error::$TAG contains Cargo version $version"; exit 1; }
           echo "version=$version" >> "$GITHUB_OUTPUT"
 
-      - uses: mlugg/setup-zig@d1434d08867e3ee9daa34448df10607b98908d29 # v2.2.1
-        with:
-          version: ${{ env.ZIG_VERSION }}
+      - name: Install zig
+        env:
+          ZIG_SHA256: ${{ matrix.arch == 'x86_64' && '3581863e3cbcfd0fce0efc682ce7e9e93da96668a977791d356a26d2a7e9b17a' || 'a1546d5646eb184437918d6635ca6b762a0e889eac09cef720ee7a1ed3fe7795' }}
+        run: |
+          cd "$RUNNER_TEMP"
+          curl -fsSL -o zig.tar.xz "https://ziglang.org/download/$ZIG_VERSION/zig-${{ matrix.arch }}-linux-$ZIG_VERSION.tar.xz"
+          echo "$ZIG_SHA256  zig.tar.xz" | sha256sum -c -
+          tar -xJf zig.tar.xz
+          echo "$RUNNER_TEMP/zig-${{ matrix.arch }}-linux-$ZIG_VERSION" >> "$GITHUB_PATH"
 
       - name: Restore libghostty-vt
         id: ghostty-cache
