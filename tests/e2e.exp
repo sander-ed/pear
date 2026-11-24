@@ -13,8 +13,8 @@ proc fail {msg} { puts "\nFAIL: $msg"; exit 1 }
 # 1. create session running sh
 spawn $pear -k "C-a d" new t1 /bin/sh
 expect {
-    "attached to t1" {}
-    timeout { fail "no attach banner" }
+    -ex "\x1b\[?1049h" {}
+    timeout { fail "did not switch to the alternate screen" }
 }
 expect "PROMPT>"
 send "echo marker-\$((40+2))\r"
@@ -117,8 +117,10 @@ wait
 
 # 10. bare `pear` creates numbered sessions 1, 2, ...
 spawn $pear
+expect "PROMPT>"
+send "echo in-\$PEAR\r"
 expect {
-    "attached to 1" {}
+    "in-1" {}
     timeout { fail "bare pear did not create session 1" }
 }
 expect "PROMPT>"
@@ -129,8 +131,10 @@ wait
 # 11. detach works while the program uses the kitty keyboard protocol
 # (Ctrl-a arrives as ESC [ 97 ; 5 u, like inside GitHub Copilot CLI)
 spawn $pear
+expect "PROMPT>"
+send "echo in-\$PEAR\r"
 expect {
-    "attached to 2" {}
+    "in-2" {}
     timeout { fail "bare pear did not create session 2" }
 }
 expect "PROMPT>"
@@ -179,21 +183,88 @@ expect {
 }
 wait
 
-# 14. leaving the session must not restore a stale saved cursor: the reset
-# saves the cursor (ESC 7) right before ESC[?1049l, so the cursor stays put
+# 14. the session is contained in the alternate screen: the program's own
+# screen switches never reach the terminal, and leaving resets the modes and
+# returns to the primary screen, which restores what was there before
 spawn $pear new -d c1 /bin/sh -c "sleep 100"
 expect "created c1"
 wait
 spawn $pear attach c1
-expect "\x1b\[H\x1b\[2J"
+expect -ex "\x1b\[?1049h"
 send "\001d"
 expect {
-    -re "\x1b7\x1b\\\[\\?1049l.*detached from c1" {}
-    timeout { fail "cursor not saved before leaving the alternate screen" }
+    -re "\x1b\\\[<99u.*\x1b\\\[\\?1049l.*detached from c1" {}
+    timeout { fail "did not leave the alternate screen" }
 }
 wait
 spawn $pear kill c1
 expect "killed c1"
+wait
+spawn $pear new s1 /bin/sh
+expect "PROMPT>"
+send "printf 'A\\033\[?1049hB\\033\[?1049lC\\n'\r"
+expect {
+    -re "\x1b\\\[\\?1049\[hl\]" { fail "program's screen switch reached the terminal" }
+    -re "\nAC\r" {}
+    timeout { fail "output around screen switches was lost" }
+}
+send "exit\r"
+expect "exited with status 0"
+wait
+
+# 15. `pear NAME -d -- CMD` creates NAME with a shell and types CMD into it;
+# `pear NAME -- CMD` does the same and attaches
+spawn $pear r1 -d -- echo sent-\$((6*7))
+expect {
+    "created r1: echo sent-" {}
+    timeout { fail "send -d did not create r1" }
+}
+wait
+spawn $pear r1 -d -- echo again-\$((7*7))
+expect {
+    "sent to r1: echo again-" {}
+    timeout { fail "send -d to existing r1 failed" }
+}
+wait
+sleep 0.5
+spawn $pear attach r1
+expect {
+    -re "sent-42.*again-49" {}
+    timeout { fail "sent commands did not run in r1" }
+}
+send "\001d"
+expect "detached from r1"
+wait
+spawn $pear r1 -- echo third-\$((8*8))
+expect {
+    "third-64" {}
+    timeout { fail "pear NAME -- CMD did not run and attach" }
+}
+send "exit\r"
+expect "exited with status 0"
+wait
+spawn $pear r2 -- echo new-\$PEAR
+expect {
+    "new-r2" {}
+    timeout { fail "pear NAME -- CMD did not create and attach" }
+}
+send "exit\r"
+expect "exited with status 0"
+wait
+spawn $pear r3 -d -- true
+expect "created r3"
+wait
+spawn $pear r3 -d -- exit
+expect "sent to r3"
+wait
+spawn sh -c "sleep 0.5; $pear r3 -d -- true; echo rc=\$?"
+expect {
+    -re "created r3.*rc=0" {}
+    timeout { fail "r3 should be gone after exit and be recreated" }
+}
+wait
+spawn $pear kill r3
+expect "killed r3"
 wait
 
 file delete -force $env(PEAR_DIR)

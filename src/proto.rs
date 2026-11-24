@@ -12,6 +12,9 @@ pub const C_INPUT: u8 = 0x02; // payload: raw bytes for the program
 pub const C_RESIZE: u8 = 0x03; // payload: cols u16 LE, rows u16 LE
 pub const C_KILL: u8 = 0x04; // payload: none. Kill the program and exit.
 pub const C_INFO: u8 = 0x05; // payload: none. Ask for a status line.
+/// payload: bytes to type into the program once it is ready for input.
+/// Answered with S_INFO once written.
+pub const C_SEND: u8 = 0x06;
 
 // server -> client
 pub const S_OUTPUT: u8 = 0x81; // payload: raw bytes for the terminal

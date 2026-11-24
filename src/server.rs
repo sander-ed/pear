@@ -15,6 +15,7 @@ const CLIENT_BACKLOG_LIMIT: usize = 4 * 1024 * 1024;
 const KILL_GRACE: Duration = Duration::from_millis(500);
 
 struct Client {
+    id: u64,
     fd: RawFd,
     dec: Decoder,
     /// Encoded frames waiting to be written; `sent` bytes of the first are already out.
@@ -30,8 +31,9 @@ struct Client {
 }
 
 impl Client {
-    fn new(fd: RawFd) -> Self {
+    fn new(id: u64, fd: RawFd) -> Self {
         Client {
+            id,
             fd,
             dec: Decoder::default(),
             frames: VecDeque::new(),
@@ -100,6 +102,7 @@ pub struct Server {
     sig_fd: RawFd,
     child: pty::Child,
     screen: Box<dyn Screen>,
+    filter: term::ScreenSwitchFilter,
     size: WinSize,
     clients: Vec<Client>,
     exit_status: Option<i32>,
@@ -107,7 +110,18 @@ pub struct Server {
     attach_seq: u64,
     /// After `pear kill`: when to escalate to SIGKILL.
     kill_deadline: Option<Instant>,
+    started: Instant,
+    last_output: Option<Instant>,
+    /// `pear NAME -- CMD` input waiting for the program to be ready: (client id, bytes).
+    sends: Vec<(u64, Vec<u8>)>,
+    next_client_id: u64,
 }
+
+/// Input sent with `pear NAME -- CMD` is typed once the program has printed
+/// something (its prompt) and then been quiet for this long...
+const SEND_QUIET: Duration = Duration::from_millis(200);
+/// ...or this long after the session started, whichever comes first.
+const SEND_MAX_WAIT: Duration = Duration::from_secs(3);
 
 impl Server {
     /// Create the session: bind the socket and spawn the program.
@@ -144,12 +158,17 @@ impl Server {
             sig_fd,
             child,
             screen: term::new_screen(size),
+            filter: term::ScreenSwitchFilter::default(),
             size,
             clients: Vec::new(),
             exit_status: None,
             cmd: cmd.join(" "),
             attach_seq: 0,
             kill_deadline: None,
+            started: Instant::now(),
+            last_output: None,
+            sends: Vec::new(),
+            next_client_id: 0,
         })
     }
 
@@ -193,10 +212,16 @@ impl Server {
                 });
             }
 
-            let timeout = self.kill_deadline.map_or(-1, |d| {
-                let left = d.saturating_duration_since(Instant::now()).as_millis();
-                i32::try_from(left).unwrap_or(i32::MAX)
-            });
+            let send_at = (!self.sends.is_empty()).then(|| self.send_ready_at());
+            let timeout = [self.kill_deadline, send_at]
+                .into_iter()
+                .flatten()
+                .min()
+                .map_or(-1, |d| {
+                    // Round up so we don't wake just before the deadline.
+                    let left = d.saturating_duration_since(Instant::now()).as_millis() + 1;
+                    i32::try_from(left).unwrap_or(i32::MAX)
+                });
             if sys::poll(&mut pfds, timeout).is_err() {
                 continue;
             }
@@ -224,7 +249,8 @@ impl Server {
             if pfds[0].revents != 0 {
                 while let Ok(fd) = sys::unix_accept(self.listen_fd) {
                     if sys::set_nonblocking(fd, true).is_ok() {
-                        self.clients.push(Client::new(fd));
+                        self.next_client_id += 1;
+                        self.clients.push(Client::new(self.next_client_id, fd));
                     } else {
                         sys::close(fd);
                     }
@@ -265,6 +291,7 @@ impl Server {
                     dead.push(i);
                 }
             }
+            self.deliver_sends();
             for c in &mut self.clients {
                 if c.flush().is_err() {
                     sys::close(c.fd);
@@ -297,6 +324,43 @@ impl Server {
                     }
                     return status;
                 }
+            }
+        }
+    }
+
+    /// When the program is ready for sent input: it printed something (its
+    /// prompt) and has been quiet since, or it has been running a while.
+    fn send_ready_at(&self) -> Instant {
+        let latest = self.started + SEND_MAX_WAIT;
+        match self.last_output {
+            Some(t) => (t + SEND_QUIET).min(latest).max(self.started),
+            None => latest,
+        }
+    }
+
+    /// Type queued `pear NAME -- CMD` input into the program once it's ready,
+    /// then tell the sender it's done.
+    fn deliver_sends(&mut self) {
+        if self.sends.is_empty() {
+            return;
+        }
+        if self.exit_status.is_some() {
+            // Too late: closing the connection tells the sender.
+            for (id, _) in self.sends.drain(..) {
+                if let Some(c) = self.clients.iter_mut().find(|c| c.id == id) {
+                    sys::close(c.fd);
+                    c.fd = -1;
+                }
+            }
+            return;
+        }
+        if Instant::now() < self.send_ready_at() {
+            return;
+        }
+        for (id, bytes) in std::mem::take(&mut self.sends) {
+            let _ = sys::write_all(self.child.master, &bytes);
+            if let Some(c) = self.clients.iter_mut().find(|c| c.id == id) {
+                c.queue(proto::S_INFO, b"sent");
             }
         }
     }
@@ -379,16 +443,20 @@ impl Server {
             // Nobody's attached, so answer terminal queries ourselves.
             let _ = sys::write(self.child.master, &resp);
         }
+        // Clients show the session on their alternate screen, so the program's
+        // own screen switches must not reach them. When it switches, repaint
+        // the clients from the emulated screen instead.
+        let (data, switched) = self.filter.feed(data);
         let mut snapshot: Option<Vec<u8>> = None;
         for c in &mut self.clients {
             if !c.attached {
                 continue;
             }
-            if c.queued > CLIENT_BACKLOG_LIMIT {
+            if switched || c.queued > CLIENT_BACKLOG_LIMIT {
                 let snap = snapshot.get_or_insert_with(|| self.screen.snapshot());
                 c.resync(snap);
-            } else {
-                c.queue(proto::S_OUTPUT, data);
+            } else if !data.is_empty() {
+                c.queue(proto::S_OUTPUT, &data);
             }
         }
     }
@@ -404,6 +472,7 @@ impl Server {
                     break;
                 }
                 Ok(n) => {
+                    self.last_output = Some(Instant::now());
                     let data = buf[..n].to_vec();
                     self.broadcast_output(&data);
                 }
@@ -462,6 +531,13 @@ impl Server {
                     pty::kill(-self.child.pid, libc::SIGHUP);
                     self.kill_deadline
                         .get_or_insert_with(|| Instant::now() + KILL_GRACE);
+                }
+                proto::C_SEND => {
+                    if self.exit_status.is_some() {
+                        return Err(io::ErrorKind::ConnectionAborted.into());
+                    }
+                    let id = self.clients[i].id;
+                    self.sends.push((id, payload));
                 }
                 proto::C_INFO => {
                     let attached = self.clients.iter().filter(|c| c.attached).count();

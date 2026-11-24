@@ -30,6 +30,8 @@ pear                         start a new session named 1, 2, 3, ... and attach
 pear NAME [CMD...]           attach to NAME, or create it if it doesn't exist
 pear new [NAME] [CMD...]     create a session running CMD (default: $SHELL) and attach
 pear new -d [NAME] [CMD...]  create without attaching
+pear NAME -- CMD...          run CMD in NAME's shell (creating NAME if needed) and attach
+pear NAME -d -- CMD...       run CMD in NAME's shell without attaching
 pear attach NAME             attach to an existing session
 pear ls                      list sessions
 pear kill NAME               terminate the program running in NAME
@@ -38,6 +40,18 @@ pear kill NAME               terminate the program running in NAME
 Like tmux, a bare `pear` takes the lowest free number, so with sessions `1`
 and `3` running the next one is `2`. When `pear` is not run in a terminal
 (for example piped into another command), it lists sessions instead.
+
+A session is shown on your terminal's alternate screen, like tmux. When you
+detach, or the program exits, your terminal is back exactly as it was before
+you attached: the session's output stays in the session.
+
+`pear NAME -- CMD` types CMD into the session's shell as if you had, then
+attaches, so after CMD finishes you are left in that shell. With `-d` it only
+runs CMD, for example `pear build -d -- make test`; look at the result later with
+`pear build`. If NAME doesn't exist yet, it is created running `$SHELL`, and CMD
+is typed once the shell has printed its prompt. Compare `pear NAME CMD` (no
+`--`), which creates NAME running CMD instead of a shell, so the session ends
+when CMD does.
 
 Detach with **Ctrl-a d** (default). Change it per invocation with
 `-k`/`--detach-key`, or permanently in `~/.config/pear/config`:

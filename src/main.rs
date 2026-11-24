@@ -27,6 +27,8 @@ Usage:
                                create a session running CMD (default: $SHELL);
                                without NAME, use the next free number
   pear [new] [-d] -- CMD...    run CMD in a new numbered session
+  pear NAME [-d] -- CMD...     type CMD into NAME's shell (creating NAME
+                               if needed), then attach unless -d
   pear attach NAME             attach to an existing session
   pear ls                      list sessions
   pear kill NAME               terminate the program running in NAME
@@ -73,10 +75,12 @@ fn leading(first: &str) -> usize {
 fn parse_args(mut args: impl Iterator<Item = String>) -> Args {
     let mut a = Args::default();
     while let Some(arg) = args.next() {
-        let in_options = a
-            .positional
-            .first()
-            .is_none_or(|first| a.positional.len() < leading(first));
+        // Options go before the command's CMD...: `pear new x -d sleep 1` but
+        // `pear new x sleep -d`, `pear work -d -- ls` but `pear work ls -la`.
+        let in_options = a.positional.first().is_none_or(|first| {
+            let n = leading(first);
+            a.positional.len() < n || (a.positional.len() == n && arg.starts_with('-'))
+        });
         if !in_options {
             a.positional.push(arg);
             a.positional.extend(args.by_ref());
@@ -173,6 +177,13 @@ fn main() {
             let name = name_arg(cmd);
             no_extra(2);
             cmd_kill(&dir, name)
+        }
+        Some(name) if args.dashdash == Some(1) => {
+            // `pear NAME [-d] -- CMD...`: type CMD into NAME's shell.
+            if pos.len() == 1 {
+                die("missing command after `--`");
+            }
+            cmd_send(&dir, name, &pos[1..], &detach_key(), args.detached)
         }
         Some(name) => {
             // `pear NAME [CMD...]`: attach or create.
@@ -353,6 +364,53 @@ fn cmd_kill(dir: &Path, name: &str) -> i32 {
     }
 }
 
+/// `pear NAME [-d] -- CMD...`: run CMD in NAME's shell as if typed there
+/// (creating NAME with a shell first if needed), then attach unless detached.
+fn cmd_send(dir: &Path, name: &str, cmd: &[String], detach_key: &[u8], detached: bool) -> i32 {
+    check_name(name);
+    let path = sock_path(dir, name);
+    let created = if session_alive(&path) {
+        false
+    } else {
+        if !detached {
+            check_tty();
+        }
+        ensure_dir(dir);
+        match start_server(dir, name, &[default_shell()]) {
+            Ok(()) => true,
+            Err(StartError::Exists) => false, // someone just created it
+            Err(StartError::Failed(msg)) => die(format!("cannot start session: {msg}")),
+        }
+    };
+    if !detached {
+        if std::env::var("PEAR_SOCKET").is_ok_and(|cur| same_file(&cur, &path)) {
+            die(format!("already inside session `{name}`"));
+        }
+        check_tty();
+    }
+
+    let mut line = cmd.join(" ").into_bytes();
+    line.push(b'\r');
+    // When attaching, the user sees the command run; when detached, wait
+    // until it has been typed so errors are reported.
+    if let Err(e) = client::send(&path, &line, detached) {
+        die(format!("cannot send to `{name}`: {e}"));
+    }
+    if detached {
+        let verb = if created { "created" } else { "sent to" };
+        eprintln!("[{verb} {name}: {}]", cmd.join(" "));
+        return 0;
+    }
+    run_attach(&path, name, detach_key)
+}
+
+fn default_shell() -> String {
+    std::env::var("SHELL")
+        .ok()
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| "/bin/sh".into())
+}
+
 enum StartError {
     Exists,
     Failed(String),
@@ -374,12 +432,7 @@ fn cmd_new(
     ensure_dir(dir);
 
     let cmd: Vec<String> = if cmd.is_empty() {
-        vec![
-            std::env::var("SHELL")
-                .ok()
-                .filter(|s| !s.is_empty())
-                .unwrap_or_else(|| "/bin/sh".into()),
-        ]
+        vec![default_shell()]
     } else {
         cmd.to_vec()
     };
@@ -400,13 +453,12 @@ fn cmd_new(
     };
 
     if detached {
-        eprintln!("[created {name}]");
+        eprintln!(
+            "[created {name}; attach with `pear {name}`, detach with {}]",
+            config::describe_key(detach_key)
+        );
         return 0;
     }
-    eprintln!(
-        "[attached to {name}; detach with {}]",
-        config::describe_key(detach_key)
-    );
     run_attach(&sock_path(dir, &name), &name, detach_key)
 }
 
@@ -506,6 +558,13 @@ mod tests {
         let a = parse(&["work", "ls", "-la"]);
         assert!(!a.detached);
         assert_eq!(a.positional, ["work", "ls", "-la"]);
+        let a = parse(&["coco", "-d", "--", "ls", "-d"]);
+        assert!(a.detached);
+        assert_eq!(a.positional, ["coco", "ls", "-d"]);
+        assert_eq!(a.dashdash, Some(1));
+        let a = parse(&["coco", "--", "cortex"]);
+        assert!(!a.detached);
+        assert_eq!(a.dashdash, Some(1));
         let a = parse(&["new", "--", "-x"]);
         assert_eq!(a.positional, ["new", "-x"]);
         assert_eq!(a.dashdash, Some(1));
