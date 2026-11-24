@@ -7,6 +7,22 @@ Like [abduco](https://github.com/martanne/abduco), minus everything you don't ne
 - Exact screen repaint on reattach (vim, htop, ...) via [libghostty-vt](https://lib.ghostty.org/vt/).
 - One static binary, ~1.5 MB, one dependency (`libc`), single-threaded `poll` loop.
 
+## Install
+
+On macOS or Linux with [Homebrew](https://brew.sh):
+
+```sh
+brew tap sander-ed/tap https://github.com/sander-ed/sander-ed-tap.git
+brew install sander-ed/tap/pear
+```
+
+This installs a prebuilt binary with libghostty-vt linked in (about 1.6 MB, no
+dependencies). No compiler or zig is needed.
+
+Each [GitHub Release](https://github.com/sander-ed/pear/releases) also has the
+archives for macOS (Apple Silicon, Intel) and Linux (x86_64, ARM64, static
+musl), plus `SHA256SUMS`.
+
 ## Usage
 
 ```
@@ -77,3 +93,32 @@ Wire protocol: `[type u8][len u32 LE][payload]`. See `src/proto.rs`.
 PKG_CONFIG_PATH="$HOME/.local/lib/pkgconfig" cargo test
 expect tests/e2e.exp target/release/pear   # end-to-end on a real pty
 ```
+
+## Releasing
+
+Bump `[package].version` in `Cargo.toml`, run `cargo update -p pear`, and
+commit on `main`. Then, on a Mac with `zig` 0.17.1, `rustup`, and `gh`:
+
+```sh
+scripts/release.sh            # or --dry-run to only build and test into dist/
+```
+
+The script builds libghostty-vt with zig and pear for both macOS
+architectures. It checks that each binary uses only system libraries and runs
+the tests on the native one. Then it pushes `main` and creates the `vVERSION`
+tag and GitHub Release with the macOS archives.
+
+Publishing the release starts the **Release** workflow
+(`.github/workflows/release.yml`). It builds and tests static Linux binaries
+for x86_64 and ARM64 with libghostty-vt, then uploads them and `SHA256SUMS` to
+the release. Finally it renders `packaging/homebrew/pear.rb` and commits it to
+[`sander-ed/sander-ed-tap`](https://github.com/sander-ed/sander-ed-tap). To
+retry, run the workflow manually with the tag.
+
+The workflow pushes to the tap with the `HOMEBREW_TAP_DEPLOY_KEY` Actions
+secret, which holds a write-enabled deploy key on the tap repository. To rotate
+it, replace both the deploy key and the secret.
+
+## License
+
+[MIT](LICENSE)

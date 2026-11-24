@@ -1,0 +1,197 @@
+name: Release
+
+# scripts/release.sh (run on a Mac) creates the vVERSION GitHub Release with
+# the macOS binaries. Publishing it triggers this workflow, which builds the
+# static Linux binaries with libghostty-vt, adds them and SHA256SUMS to the
+# release, and updates the Homebrew tap. Run it manually with a tag to retry.
+
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Release tag to finish, e.g. v0.1.0
+        required: true
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.event.release.tag_name || inputs.tag }}
+  cancel-in-progress: false
+
+env:
+  TAG: ${{ github.event.release.tag_name || inputs.tag }}
+  GHOSTTY_VT_VERSION: 1.0.1
+  GHOSTTY_VT_SHA256: 333dfce97641ef9b536bb9e08907ad86abaaada50e8f7417b70d9284adef37aa
+  ZIG_VERSION: 0.17.1
+
+jobs:
+  build:
+    strategy:
+      fail-fast: true
+      matrix:
+        include:
+          - { arch: x86_64, os: ubuntu-24.04 }
+          - { arch: aarch64, os: ubuntu-24.04-arm }
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    env:
+      TARGET: ${{ matrix.arch }}-unknown-linux-musl
+      ZIG_TARGET: ${{ matrix.arch }}-linux-musl
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          ref: refs/tags/${{ env.TAG }}
+
+      - name: Check the version
+        id: version
+        run: |
+          version=$(sed -nE 's/^version *= *"([^"]+)".*/\1/p' Cargo.toml | head -n1)
+          test "v$version" = "$TAG" || { echo "::error::$TAG contains Cargo version $version"; exit 1; }
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+
+      - uses: mlugg/setup-zig@d1434d08867e3ee9daa34448df10607b98908d29 # v2.2.1
+        with:
+          version: ${{ env.ZIG_VERSION }}
+
+      - name: Restore libghostty-vt
+        id: ghostty-cache
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ runner.temp }}/ghostty-vt
+          key: libghostty-vt-${{ env.GHOSTTY_VT_VERSION }}-zig-${{ env.ZIG_VERSION }}-${{ env.ZIG_TARGET }}
+
+      - name: Build libghostty-vt
+        if: steps.ghostty-cache.outputs.cache-hit != 'true'
+        run: |
+          cd "$RUNNER_TEMP"
+          curl -fsSL -o ghostty.tar.gz \
+            "https://release.files.ghostty.org/libghostty-vt/$GHOSTTY_VT_VERSION/libghostty-vt-$GHOSTTY_VT_VERSION.tar.gz"
+          echo "$GHOSTTY_VT_SHA256  ghostty.tar.gz" | sha256sum -c -
+          tar -xzf ghostty.tar.gz
+          cd "libghostty-vt-$GHOSTTY_VT_VERSION"
+          zig build -Demit-lib-vt=true -Doptimize=ReleaseFast -Dtarget="$ZIG_TARGET" --prefix "$RUNNER_TEMP/ghostty-vt"
+
+      - name: Build
+        run: |
+          # Link with zig's musl so the C++ parts of libghostty-vt resolve and
+          # the result is fully static. Rust's own self-contained musl CRT
+          # would clash with zig's, and zig rejects one aarch64 lld flag.
+          linker="$RUNNER_TEMP/zig-cc"
+          cat > "$linker" <<EOF
+          #!/bin/sh
+          for arg in "\$@"; do
+            shift
+            case "\$arg" in *fix-cortex-a53-843419) ;; *) set -- "\$@" "\$arg" ;; esac
+          done
+          exec zig cc -target $ZIG_TARGET "\$@"
+          EOF
+          chmod +x "$linker"
+          upper=$(echo "$TARGET" | tr 'a-z-' 'A-Z_')
+          export "CARGO_TARGET_${upper}_LINKER=$linker"
+          export "CARGO_TARGET_${upper}_RUSTFLAGS=-C link-self-contained=no"
+          export GHOSTTY_VT_DIR="$RUNNER_TEMP/ghostty-vt"
+
+          rustup toolchain install stable --profile minimal --target "$TARGET" --no-self-update
+          cargo +stable test --release --locked --target "$TARGET"
+          cargo +stable build --release --locked --target "$TARGET"
+
+      - name: Test
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          binary="target/$TARGET/release/pear"
+          file "$binary"
+          file "$binary" | grep -q "statically linked"
+          test "$("$binary" --version)" = "pear $VERSION (libghostty-vt)"
+          sudo apt-get update -qq && sudo apt-get install -y -qq expect > /dev/null
+          expect tests/e2e.exp "$binary" > e2e.log || { cat e2e.log; exit 1; }
+
+      - name: Package
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          mkdir -p dist staging
+          cp "target/$TARGET/release/pear" LICENSE README.md staging/
+          tar -czf "dist/pear-$VERSION-$TARGET.tar.gz" -C staging .
+
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: ${{ env.TARGET }}
+          path: dist/*
+          if-no-files-found: error
+
+  publish:
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          ref: refs/tags/${{ env.TAG }}
+
+      - name: Check out the tap
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          repository: sander-ed/sander-ed-tap
+          ref: main
+          path: homebrew-tap
+          ssh-key: ${{ secrets.HOMEBREW_TAP_DEPLOY_KEY }}
+
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: Add the macOS binaries and checksums
+        run: |
+          gh release download "$TAG" --dir dist --pattern '*-apple-darwin.tar.gz' --clobber
+          cd dist
+          sha256sum pear-* > SHA256SUMS
+          cat SHA256SUMS
+
+      - name: Upload the Linux binaries
+        run: gh release upload "$TAG" dist/*-linux-musl.tar.gz dist/SHA256SUMS --clobber
+
+      - name: Render the formula
+        shell: python
+        run: |
+          import os
+          import re
+          from pathlib import Path
+
+          version = os.environ["TAG"].removeprefix("v")
+          sums = {}
+          for line in Path("dist/SHA256SUMS").read_text().splitlines():
+              digest, name = line.split()
+              sums[name] = digest
+
+          text = Path("packaging/homebrew/pear.rb").read_text()
+          text = text.replace("@@VERSION@@", version)
+          def checksum(match):
+              return sums[f"pear-{version}-{match[1]}.tar.gz"]
+          text = re.sub(r"@@SHA256_([A-Za-z0-9_-]+)@@", checksum, text)
+          if "@@" in text:
+              raise ValueError("Unfilled placeholder in the formula")
+          Path("homebrew-tap/Formula").mkdir(exist_ok=True)
+          Path("homebrew-tap/Formula/pear.rb").write_text(text)
+          print(text)
+
+      - name: Publish the formula
+        working-directory: homebrew-tap
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add Formula/pear.rb
+          if git diff --cached --quiet; then
+            echo "The tap already has this formula."
+          else
+            git commit -m "Update pear to $TAG"
+            git push origin HEAD:main
+          fi
