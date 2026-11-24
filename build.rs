@@ -32,6 +32,15 @@ fn main() {
         return;
     }
 
+    // Last resort: the default prefix suggested by the libghostty-vt docs.
+    if let Some(home) = std::env::var_os("HOME") {
+        let lib = std::path::PathBuf::from(home).join(".local/lib");
+        if lib.join("libghostty-vt.a").exists() {
+            link_static(&lib);
+            return;
+        }
+    }
+
     panic!(
         "libghostty-vt not found.\n\
          Install it (needs zig 0.17):\n\
