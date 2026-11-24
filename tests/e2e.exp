@@ -1,0 +1,119 @@
+#!/usr/bin/expect -f
+# End-to-end test: create, detach, list, reattach (screen restore), exit, kill.
+# Usage: expect tests/e2e.exp path/to/pear
+
+set pear [lindex $argv 0]
+set timeout 10
+set env(PEAR_DIR) "/tmp/pear-e2e-[pid]"
+set env(PS1) "PROMPT> "
+file delete -force $env(PEAR_DIR)
+
+proc fail {msg} { puts "\nFAIL: $msg"; exit 1 }
+
+# 1. create session running sh
+spawn $pear -k "C-a d" new t1 /bin/sh
+expect {
+    "attached to t1" {}
+    timeout { fail "no attach banner" }
+}
+expect "PROMPT>"
+send "echo marker-\$((40+2))\r"
+expect {
+    "marker-42" {}
+    timeout { fail "no echo" }
+}
+expect "PROMPT>"
+
+# 2. detach with C-a d
+send "\001d"
+expect {
+    "detached from t1" {}
+    timeout { fail "no detach" }
+}
+wait
+
+# 3. list shows it running
+spawn $pear ls
+expect {
+    -re "t1\t\\d+x\\d+\t0 attached\trunning" {}
+    timeout { fail "ls did not show running session" }
+}
+wait
+
+# 4. reattach: the screen should be repainted with the previous output
+spawn $pear attach t1
+expect {
+    "marker-42" {}
+    timeout { fail "screen not restored on reattach" }
+}
+send "echo second-\$((50+5))\r"
+expect {
+    "second-55" {}
+    timeout { fail "no echo after reattach" }
+}
+
+# 5. prefix that is not the detach key is passed through: C-a (beginning of line) then x
+send "echo abc"
+send "\001"
+sleep 0.7
+send "\r"
+expect {
+    "abc" {}
+    timeout { fail "C-a prefix was swallowed" }
+}
+
+# 6. program exits -> client exits with its status
+send "exit 3\r"
+expect {
+    "exited with status 3" {}
+    timeout { fail "no exit status" }
+}
+catch wait result
+if {[lindex $result 3] != 3} { fail "pear exit code was [lindex $result 3], want 3" }
+
+# 7. session is gone
+spawn $pear ls
+expect {
+    "no sessions" {}
+    timeout { fail "session still listed after exit" }
+}
+wait
+
+# 8. kill a detached session
+spawn $pear -d new t2 /bin/sh -c "sleep 100"
+expect "created t2"
+wait
+spawn $pear kill t2
+expect "killed t2"
+wait
+sleep 0.3
+spawn $pear ls
+expect {
+    "no sessions" {}
+    timeout { fail "t2 still listed after kill" }
+}
+wait
+
+# 9. alt-screen program (vi) survives detach/reattach with screen intact
+set bskey "C-\\"
+spawn $pear -k $bskey new v1 vi
+expect {
+    -re "~" {}
+    timeout { fail "vi did not start" }
+}
+send "ihello from vi"
+expect "hello from vi"
+send "\034"
+expect "detached from v1"
+wait
+spawn $pear attach v1
+expect {
+    "hello from vi" {}
+    timeout { fail "vi screen not restored" }
+}
+send "\033:q!\r"
+expect "exited with status 0"
+wait
+
+file delete -force $env(PEAR_DIR)
+puts "\nALL OK"
