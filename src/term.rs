@@ -21,19 +21,24 @@ pub trait Screen {
 /// Put the client's terminal in a known, sane state before repainting / after detaching.
 pub fn sane_terminal() -> &'static [u8] {
     concat!(
-        "\x1b[0m",                                                            // reset SGR
-        "\x1b[?1049l", // leave alternate screen
-        "\x1b[?25h",   // cursor visible
-        "\x1b[?1l",    // normal cursor keys
-        "\x1b>",       // normal keypad
-        "\x1b[?7h",    // autowrap on
+        "\x1b[0m", // reset SGR
+        // Leave the alternate screen. ?1049l also restores the saved cursor,
+        // even when already on the primary screen, where that is a stale
+        // position from an earlier save. Save the current one first so the
+        // cursor stays put. (DECSC slots are per screen, so on the alternate
+        // screen this doesn't touch the primary screen's saved cursor.)
+        "\x1b7\x1b[?1049l",
+        "\x1b[?25h", // cursor visible
+        "\x1b[?1l",  // normal cursor keys
+        "\x1b>",     // normal keypad
+        "\x1b[?7h",  // autowrap on
         "\x1b[?1000l\x1b[?1002l\x1b[?1003l\x1b[?1005l\x1b[?1006l\x1b[?1016l", // mouse off
         "\x1b[?1004l", // focus events off
         "\x1b[?2004l", // bracketed paste off
         "\x1b[?2026l", // synchronized output off
-        "\x1b[=0;1u",  // kitty keyboard flags off...
-        "\x1b[<99u",   // ...and pop everything the program pushed
-        "\x1b[>4m",    // xterm modifyOtherKeys off
+        "\x1b[=0;1u", // kitty keyboard flags off...
+        "\x1b[<99u", // ...and pop everything the program pushed
+        "\x1b[>4m",  // xterm modifyOtherKeys off
         // Reset the scroll region. DECSTBM also homes the cursor, so save and
         // restore it: messages printed after detaching belong below the output.
         "\x1b7\x1b[r\x1b8",

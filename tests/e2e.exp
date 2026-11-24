@@ -179,5 +179,22 @@ expect {
 }
 wait
 
+# 14. leaving the session must not restore a stale saved cursor: the reset
+# saves the cursor (ESC 7) right before ESC[?1049l, so the cursor stays put
+spawn $pear new -d c1 /bin/sh -c "sleep 100"
+expect "created c1"
+wait
+spawn $pear attach c1
+expect "\x1b\[H\x1b\[2J"
+send "\001d"
+expect {
+    -re "\x1b7\x1b\\\[\\?1049l.*detached from c1" {}
+    timeout { fail "cursor not saved before leaving the alternate screen" }
+}
+wait
+spawn $pear kill c1
+expect "killed c1"
+wait
+
 file delete -force $env(PEAR_DIR)
 puts "\nALL OK"
