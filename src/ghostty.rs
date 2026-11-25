@@ -32,7 +32,7 @@ pub type GhosttyTerminalWritePtyFn =
 // GhosttyTerminalOption
 pub const GHOSTTY_TERMINAL_OPT_USERDATA: c_int = 1;
 pub const GHOSTTY_TERMINAL_OPT_WRITE_PTY: c_int = 2;
-pub const GHOSTTY_TERMINAL_OPT_SCROLLBACK_MAX_LINES: c_int = 29;
+pub const GHOSTTY_TERMINAL_OPT_SCROLLBACK_MAX_BYTES: c_int = 28;
 
 // GhosttyTerminalData
 pub const GHOSTTY_TERMINAL_DATA_CURSOR_VISIBLE: c_int = 7;

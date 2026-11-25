@@ -18,164 +18,34 @@ pub trait Screen {
     fn take_pty_responses(&mut self) -> Vec<u8>;
 }
 
-// A session is shown on the alternate screen of the client's terminal, like
-// tmux does: attaching switches to it, leaving switches back, and the user's
-// terminal looks exactly as it did before. The program's own screen switches
-// never reach the client's terminal; the server repaints instead.
-
-/// Sent when a client attaches: switch to the alternate screen (this saves
-/// the cursor) and clear it.
-pub const ENTER_SCREEN: &[u8] = b"\x1b[?1049h\x1b[H\x1b[2J";
-
-/// Reset every mode a program may have changed, without switching screens.
-pub fn reset_modes() -> &'static [u8] {
+/// Put the client's terminal in a known, sane state before repainting / after detaching.
+/// The client's terminal follows the program's screen: a program on the
+/// primary screen (a shell, an inline TUI) uses the terminal's own scrollback.
+pub fn sane_terminal() -> &'static [u8] {
     concat!(
-        "\x1b[0m",                                                            // reset SGR
-        "\x1b[?25h",                                                          // cursor visible
-        "\x1b[?1l",                                                           // normal cursor keys
-        "\x1b>",                                                              // normal keypad
-        "\x1b[?7h",                                                           // autowrap on
+        "\x1b[0m", // reset SGR
+        // Leave the alternate screen. ?1049l also restores the saved cursor,
+        // even when already on the primary screen, where that is a stale
+        // position from an earlier save. Save the current one first so the
+        // cursor stays put. (DECSC slots are per screen, so on the alternate
+        // screen this doesn't touch the primary screen's saved cursor.)
+        "\x1b7\x1b[?1049l",
+        "\x1b[?25h", // cursor visible
+        "\x1b[?1l",  // normal cursor keys
+        "\x1b>",     // normal keypad
+        "\x1b[?7h",  // autowrap on
         "\x1b[?1000l\x1b[?1002l\x1b[?1003l\x1b[?1005l\x1b[?1006l\x1b[?1016l", // mouse off
-        "\x1b[?1004l",                                                        // focus events off
-        "\x1b[?2004l",                                                        // bracketed paste off
+        "\x1b[?1004l", // focus events off
+        "\x1b[?2004l", // bracketed paste off
         "\x1b[?2026l", // synchronized output off
-        "\x1b[=0;1u",  // kitty keyboard flags off...
-        "\x1b[<99u",   // ...and pop everything the program pushed
-        "\x1b[>4m",    // xterm modifyOtherKeys off
-        "\x1b[r",      // full-screen scroll region
+        "\x1b[=0;1u", // kitty keyboard flags off...
+        "\x1b[<99u", // ...and pop everything the program pushed
+        "\x1b[>4m",  // xterm modifyOtherKeys off
+        // Reset the scroll region. DECSTBM also homes the cursor, so save and
+        // restore it: messages printed after detaching belong below the output.
+        "\x1b7\x1b[r\x1b8",
     )
     .as_bytes()
-}
-
-/// Sent when a client leaves: undo the program's modes, then return to the
-/// primary screen, which restores the user's screen and cursor as they were.
-pub fn leave_screen() -> Vec<u8> {
-    let mut v = reset_modes().to_vec();
-    v.extend_from_slice(b"\x1b[?1049l");
-    v
-}
-
-/// Removes screen switches (DEC modes 47, 1047, 1049 and RIS) from a stream
-/// of program output, so they don't take the client's terminal off the
-/// session's screen. Escape sequences split across chunks are held back until
-/// complete.
-#[derive(Default)]
-pub struct ScreenSwitchFilter {
-    held: Vec<u8>,
-}
-
-/// An unfinished escape sequence longer than this is passed on as is.
-const MAX_HELD: usize = 64;
-
-impl ScreenSwitchFilter {
-    /// Returns the output to forward, and whether a screen switch was removed
-    /// (the client's screen then needs a repaint).
-    pub fn feed(&mut self, data: &[u8]) -> (Vec<u8>, bool) {
-        let input: Vec<u8>;
-        let data = if self.held.is_empty() {
-            data
-        } else {
-            let mut v = std::mem::take(&mut self.held);
-            v.extend_from_slice(data);
-            input = v;
-            &input
-        };
-        let mut out = Vec::with_capacity(data.len());
-        let mut switched = false;
-        let mut i = 0;
-        while i < data.len() {
-            let Some(off) = data[i..].iter().position(|&b| b == 0x1b) else {
-                out.extend_from_slice(&data[i..]);
-                break;
-            };
-            out.extend_from_slice(&data[i..i + off]);
-            i += off;
-            match parse_escape(&data[i..]) {
-                Escape::Incomplete if data.len() - i <= MAX_HELD => {
-                    self.held = data[i..].to_vec();
-                    break;
-                }
-                Escape::Incomplete | Escape::Other => {
-                    out.push(0x1b);
-                    i += 1;
-                }
-                Escape::Reset => {
-                    switched = true;
-                    i += 2;
-                }
-                Escape::PrivateMode { len, params, set } => {
-                    let kept: Vec<&[u8]> = params
-                        .split(|&b| b == b';')
-                        .filter(|p| !matches!(*p, b"47" | b"1047" | b"1049"))
-                        .collect();
-                    if kept.len() == params.split(|&b| b == b';').count() {
-                        out.extend_from_slice(&data[i..i + len]);
-                    } else {
-                        switched = true;
-                        if !kept.is_empty() {
-                            out.extend_from_slice(b"\x1b[?");
-                            out.extend_from_slice(&kept.join(&b';'));
-                            out.push(if set { b'h' } else { b'l' });
-                        }
-                    }
-                    i += len;
-                }
-            }
-        }
-        (out, switched)
-    }
-}
-
-enum Escape<'a> {
-    Incomplete,
-    /// ESC c: full reset, which also leaves the alternate screen.
-    Reset,
-    /// CSI ? params h/l (DECSET/DECRST): total length, params, set?
-    PrivateMode {
-        len: usize,
-        params: &'a [u8],
-        set: bool,
-    },
-    Other,
-}
-
-/// `s` starts with ESC.
-fn parse_escape(s: &[u8]) -> Escape<'_> {
-    match s.get(1) {
-        None => Escape::Incomplete,
-        Some(b'c') => Escape::Reset,
-        Some(b'[') => {
-            // CSI: parameter bytes 0x30-0x3F, intermediates 0x20-0x2F, final 0x40-0x7E.
-            let mut j = 2;
-            while s.get(j).is_some_and(|b| (0x30..=0x3f).contains(b)) {
-                j += 1;
-            }
-            let params_end = j;
-            while s.get(j).is_some_and(|b| (0x20..=0x2f).contains(b)) {
-                j += 1;
-            }
-            match s.get(j) {
-                None => Escape::Incomplete,
-                Some(&f @ (b'h' | b'l')) if params_end == j && s.get(2) == Some(&b'?') => {
-                    Escape::PrivateMode {
-                        len: j + 1,
-                        params: &s[3..params_end],
-                        set: f == b'h',
-                    }
-                }
-                Some(_) => Escape::Other,
-            }
-        }
-        Some(_) => Escape::Other,
-    }
-}
-
-/// `data` without screen switches (for snapshots, which are complete).
-pub fn strip_screen_switches(data: &[u8]) -> Vec<u8> {
-    let mut f = ScreenSwitchFilter::default();
-    let (mut out, _) = f.feed(data);
-    out.append(&mut f.held);
-    out
 }
 
 pub fn new_screen(size: WinSize) -> Box<dyn Screen> {
@@ -216,64 +86,13 @@ impl Screen for RingScreen {
     }
     fn resize(&mut self, _size: WinSize) {}
     fn snapshot(&mut self) -> Vec<u8> {
-        let mut out = reset_modes().to_vec();
+        let mut out = sane_terminal().to_vec();
         out.extend_from_slice(b"\x1b[H\x1b[2J");
-        out.extend_from_slice(&strip_screen_switches(&self.buf));
+        out.extend_from_slice(&self.buf);
         out
     }
     fn take_pty_responses(&mut self) -> Vec<u8> {
         Vec::new()
-    }
-}
-
-#[cfg(test)]
-mod filter_tests {
-    use super::*;
-
-    fn run(chunks: &[&[u8]]) -> (String, bool) {
-        let mut f = ScreenSwitchFilter::default();
-        let mut out = Vec::new();
-        let mut any = false;
-        for c in chunks {
-            let (o, s) = f.feed(c);
-            out.extend(o);
-            any |= s;
-        }
-        (String::from_utf8_lossy(&out).replace('\x1b', "ESC"), any)
-    }
-
-    #[test]
-    fn strips_screen_switches() {
-        assert_eq!(run(&[b"a\x1b[?1049hb"]), ("ab".into(), true));
-        assert_eq!(
-            run(&[b"\x1b[?1049l\x1b[?47h\x1b[?1047l"]),
-            ("".into(), true)
-        );
-        assert_eq!(run(&[b"x\x1bcy"]), ("xy".into(), true));
-        // Combined modes keep the others.
-        assert_eq!(run(&[b"\x1b[?1049;25h"]), ("ESC[?25h".into(), true));
-    }
-
-    #[test]
-    fn keeps_everything_else() {
-        let s: &[u8] =
-            b"\x1b[?25l\x1b[2J\x1b[1;31mred\x1b[0m\x1b]0;title\x07\x1b7\x1b8\x1b[?10490h";
-        let (out, sw) = run(&[s]);
-        assert_eq!(
-            out.as_bytes(),
-            String::from_utf8_lossy(s).replace('\x1b', "ESC").as_bytes()
-        );
-        assert!(!sw);
-    }
-
-    #[test]
-    fn split_sequences() {
-        assert_eq!(run(&[b"a\x1b", b"[?10", b"49hb"]), ("ab".into(), true));
-        assert_eq!(run(&[b"a\x1b[", b"31mb"]), ("aESC[31mb".into(), false));
-        // An unterminated escape doesn't swallow output forever.
-        let long = [b"\x1b[".as_slice(), &[b'1'; 100]].concat();
-        let (out, _) = run(&[&long]);
-        assert_eq!(out.len(), 3 + 1 + 100);
     }
 }
 
@@ -282,7 +101,7 @@ mod filter_tests {
 
 #[cfg(feature = "ghostty")]
 pub mod ghostty {
-    use super::{Screen, reset_modes, strip_screen_switches};
+    use super::{Screen, sane_terminal};
     use crate::ghostty::*;
     use crate::sys::WinSize;
     use std::ffi::c_void;
@@ -332,12 +151,13 @@ pub mod ghostty {
                     GHOSTTY_TERMINAL_OPT_WRITE_PTY,
                     write_pty_cb as *const c_void,
                 );
-                // We only need the visible screen; keep memory small.
-                let lines: usize = 0;
+                // Keep history like Ghostty does (its default scrollback-limit),
+                // so a reattaching client gets it in its own scrollback.
+                let max_bytes: usize = 10_000_000;
                 ghostty_terminal_set(
                     term,
-                    GHOSTTY_TERMINAL_OPT_SCROLLBACK_MAX_LINES,
-                    (&raw const lines).cast(),
+                    GHOSTTY_TERMINAL_OPT_SCROLLBACK_MAX_BYTES,
+                    (&raw const max_bytes).cast(),
                 );
             }
             Ok(s)
@@ -419,14 +239,13 @@ pub mod ghostty {
 
         fn snapshot(&mut self) -> Vec<u8> {
             // Reset the client's terminal, clear, then let the formatter emit the
-            // screen plus every mode that differs from default (alt screen,
-            // cursor visibility, mouse, bracketed paste, cursor position, ...).
-            // The client shows the session on its alternate screen already, so
-            // the program's own screen switch is left out.
-            let mut out = reset_modes().to_vec();
+            // scrollback and screen plus every mode that differs from default
+            // (alt screen, cursor visibility, mouse, bracketed paste, cursor
+            // position, ...).
+            let mut out = sane_terminal().to_vec();
             out.extend_from_slice(b"\x1b[?2026h"); // synchronized update: no flicker
             out.extend_from_slice(b"\x1b[H\x1b[2J");
-            out.extend_from_slice(&strip_screen_switches(&self.format_vt()));
+            out.extend_from_slice(&self.format_vt());
             if self.mode(66) == Some(true) {
                 out.extend_from_slice(b"\x1b="); // application keypad isn't a CSI mode
             }
@@ -461,13 +280,27 @@ pub mod ghostty {
             s.write(b"\x1b[?1049h\x1b[?25l\x1b[?1000h\x1b[?2004h\x1b[2;3H\x1b[1;32mhi\x1b[0m");
             let snap = esc(&s.snapshot());
             eprintln!("{snap}");
-            // The client is already on its alternate screen.
-            assert!(!snap.contains("ESC[?1049"));
+            assert!(snap.contains("ESC[?1049h"));
             assert!(snap.contains("hi"));
             assert!(snap.contains("ESC[?25l"));
             assert!(snap.contains("ESC[?1000h"));
             assert!(snap.contains("ESC[?2004h"));
             assert!(s.alt_screen_active());
+        }
+
+        #[test]
+        fn snapshot_includes_scrollback() {
+            let mut s = GhosttyScreen::new(WinSize { cols: 20, rows: 4 }).unwrap();
+            for i in 0..100 {
+                s.write(format!("line {i}\r\n").as_bytes());
+            }
+            s.write(b"> ");
+            let snap = esc(&s.snapshot());
+            assert!(snap.contains("line 0\r\n"));
+            assert!(snap.contains("line 99\r\n"));
+            // The cursor is placed relative to the visible screen.
+            assert!(snap.ends_with("> ESC[4;3HESC[0mESC[?2026l"), "{snap}");
+            assert!(!s.alt_screen_active());
         }
 
         #[test]

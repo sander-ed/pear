@@ -1,4 +1,4 @@
-# pear
+# 🍐 Pearsistance
 
 Keep a terminal program running independently of your SSH session.
 Like [abduco](https://github.com/martanne/abduco), minus everything you don't need.
@@ -41,9 +41,11 @@ Like tmux, a bare `pear` takes the lowest free number, so with sessions `1`
 and `3` running the next one is `2`. When `pear` is not run in a terminal
 (for example piped into another command), it lists sessions instead.
 
-A session is shown on your terminal's alternate screen, like tmux. When you
-detach, or the program exits, your terminal is back exactly as it was before
-you attached: the session's output stays in the session.
+Your terminal follows the program's screen: full-screen apps use the alternate
+screen, while shells and inline apps (like agent CLIs) stay on the normal screen,
+so your terminal's own scrollback and mouse wheel work. On reattach, the
+session's scrollback is replayed so you can scroll back through what happened
+while you were away.
 
 `pear NAME -- CMD` types CMD into the session's shell as if you had, then
 attaches, so after CMD finishes you are left in that shell. With `-d` it only
@@ -104,9 +106,9 @@ Linux and macOS are both supported.
 
 `pear new` forks a small server that owns a pty and runs your program on it. The
 server feeds every byte the program writes into a libghostty-vt terminal
-(scrollback disabled, so memory is just the visible screen) and forwards it to any
-attached client over a unix socket. On attach, the server asks libghostty-vt to
-serialize the current screen (contents, styles, cursor, alternate screen, mouse and
+(scrollback capped at 10 MB, Ghostty's default) and forwards it to any attached
+client over a unix socket. On attach, the server asks libghostty-vt to serialize
+the scrollback and current screen (contents, styles, cursor, alternate screen, mouse and
 paste modes, ...) as VT sequences and sends that first. Resizes are propagated with
 `TIOCSWINSZ`. While nobody is attached the server answers terminal queries (DSR,
 DA) itself so programs don't hang. A client that falls more than 4 MB behind

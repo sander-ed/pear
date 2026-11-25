@@ -102,7 +102,6 @@ pub struct Server {
     sig_fd: RawFd,
     child: pty::Child,
     screen: Box<dyn Screen>,
-    filter: term::ScreenSwitchFilter,
     size: WinSize,
     clients: Vec<Client>,
     exit_status: Option<i32>,
@@ -158,7 +157,6 @@ impl Server {
             sig_fd,
             child,
             screen: term::new_screen(size),
-            filter: term::ScreenSwitchFilter::default(),
             size,
             clients: Vec::new(),
             exit_status: None,
@@ -443,20 +441,16 @@ impl Server {
             // Nobody's attached, so answer terminal queries ourselves.
             let _ = sys::write(self.child.master, &resp);
         }
-        // Clients show the session on their alternate screen, so the program's
-        // own screen switches must not reach them. When it switches, repaint
-        // the clients from the emulated screen instead.
-        let (data, switched) = self.filter.feed(data);
         let mut snapshot: Option<Vec<u8>> = None;
         for c in &mut self.clients {
             if !c.attached {
                 continue;
             }
-            if switched || c.queued > CLIENT_BACKLOG_LIMIT {
+            if c.queued > CLIENT_BACKLOG_LIMIT {
                 let snap = snapshot.get_or_insert_with(|| self.screen.snapshot());
                 c.resync(snap);
-            } else if !data.is_empty() {
-                c.queue(proto::S_OUTPUT, &data);
+            } else {
+                c.queue(proto::S_OUTPUT, data);
             }
         }
     }
