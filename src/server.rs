@@ -3,7 +3,7 @@
 use crate::proto::{self, Decoder};
 use crate::pty;
 use crate::sys::{self, WinSize};
-use crate::term::{self, Screen};
+use crate::term::{self, Input, Screen, Update};
 use std::collections::VecDeque;
 use std::io;
 use std::os::unix::io::RawFd;
@@ -28,6 +28,8 @@ struct Client {
     size: Option<WinSize>,
     /// Attach order, so the most recent client's size wins after a detach.
     seq: u64,
+    /// The start of a mouse report split across reads.
+    input_held: Vec<u8>,
 }
 
 impl Client {
@@ -43,6 +45,7 @@ impl Client {
             killer: false,
             size: None,
             seq: 0,
+            input_held: Vec::new(),
         }
     }
 
@@ -432,7 +435,7 @@ impl Server {
     }
 
     fn broadcast_output(&mut self, data: &[u8]) {
-        self.screen.write(data);
+        let update = self.screen.write(data);
         let resp = self.screen.take_pty_responses();
         if !resp.is_empty()
             && self.exit_status.is_none()
@@ -446,12 +449,26 @@ impl Server {
             if !c.attached {
                 continue;
             }
-            if c.queued > CLIENT_BACKLOG_LIMIT {
-                let snap = snapshot.get_or_insert_with(|| self.screen.snapshot());
-                c.resync(snap);
-            } else {
-                c.queue(proto::S_OUTPUT, data);
+            match &update {
+                Update::Forward(out) if c.queued <= CLIENT_BACKLOG_LIMIT => {
+                    if !out.is_empty() {
+                        c.queue(proto::S_OUTPUT, out);
+                    }
+                }
+                _ => {
+                    let snap = snapshot.get_or_insert_with(|| self.screen.snapshot());
+                    c.resync(snap);
+                }
             }
+        }
+    }
+
+    /// Repaint every attached client (the view scrolled, or the program
+    /// switched screens).
+    fn repaint(&mut self) {
+        let snap = self.screen.snapshot();
+        for c in self.clients.iter_mut().filter(|c| c.attached) {
+            c.resync(&snap);
         }
     }
 
@@ -499,11 +516,7 @@ impl Server {
                         c.queue(proto::S_EXIT, &status.to_le_bytes());
                     }
                 }
-                proto::C_INPUT => {
-                    if self.exit_status.is_none() {
-                        let _ = sys::write_all(self.child.master, &payload);
-                    }
-                }
+                proto::C_INPUT => self.input(i, &payload),
                 proto::C_RESIZE => {
                     if let Some(size) = proto::decode_size(&payload) {
                         self.clients[i].size = Some(size);
@@ -551,6 +564,36 @@ impl Server {
         Ok(())
     }
 
+    /// Keys go to the program (and end scrolling back); mouse reports are the
+    /// screen's to handle.
+    fn input(&mut self, i: usize, payload: &[u8]) {
+        let mut data = std::mem::take(&mut self.clients[i].input_held);
+        data.extend_from_slice(payload);
+        let (parts, held) = term::split_input(&data);
+        let mut to_program = Vec::new();
+        let mut repaint = false;
+        for part in parts {
+            match part {
+                Input::Keys(keys) => {
+                    repaint |= self.screen.scroll_to_bottom();
+                    to_program.extend_from_slice(keys);
+                }
+                Input::Mouse(m) => {
+                    let (bytes, moved) = self.screen.mouse(&m);
+                    repaint |= moved;
+                    to_program.extend_from_slice(&bytes);
+                }
+            }
+        }
+        self.clients[i].input_held = data[data.len() - held..].to_vec();
+        if repaint {
+            self.repaint();
+        }
+        if self.exit_status.is_none() && !to_program.is_empty() {
+            let _ = sys::write_all(self.child.master, &to_program);
+        }
+    }
+
     /// After a client detaches, follow the size of the most recently active one left.
     fn restore_size(&mut self) {
         let size = self
@@ -569,7 +612,9 @@ impl Server {
             return;
         }
         self.size = size;
-        self.screen.resize(size);
+        if self.screen.resize(size) {
+            self.repaint();
+        }
         if self.exit_status.is_none() {
             // The kernel delivers SIGWINCH to the foreground process group for us.
             sys::set_winsize(self.child.master, size);

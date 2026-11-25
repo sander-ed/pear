@@ -12,6 +12,10 @@ proc fail {msg} { puts "\nFAIL: $msg"; exit 1 }
 
 # 1. create session running sh
 spawn $pear -k "C-a d" new t1 /bin/sh
+expect {
+    -ex "\x1b\[?1049h" {}
+    timeout { fail "did not switch to the alternate screen" }
+}
 expect "PROMPT>"
 send "echo marker-\$((40+2))\r"
 expect {
@@ -179,43 +183,46 @@ expect {
 }
 wait
 
-# 14. leaving the session must not restore a stale saved cursor: the reset
-# saves the cursor (ESC 7) right before ESC[?1049l, so the cursor stays put
+# 14. the session is contained in the alternate screen: the program's own
+# screen switches never reach the terminal, and leaving resets the modes and
+# returns to the primary screen, which restores what was there before
 spawn $pear new -d c1 /bin/sh -c "sleep 100"
 expect "created c1"
 wait
 spawn $pear attach c1
-expect -ex "\x1b\[H\x1b\[2J"
+expect -ex "\x1b\[?1049h"
 send "\001d"
 expect {
-    -re "\x1b7\x1b\\\[\\?1049l.*detached from c1" {}
-    timeout { fail "cursor not saved before leaving the alternate screen" }
+    -re "\x1b\\\[<99u.*\x1b\\\[\\?1049l.*detached from c1" {}
+    timeout { fail "did not leave the alternate screen" }
 }
 wait
 spawn $pear kill c1
 expect "killed c1"
 wait
-
-# The terminal follows the program's screen switches, and a reattaching
-# client gets the scrollback, not just the visible screen.
 spawn $pear new s1 /bin/sh
 expect "PROMPT>"
 send "printf 'A\\033\[?1049hB\\033\[?1049lC\\n'\r"
 expect {
-    -ex "A\x1b\[?1049hB\x1b\[?1049lC" {}
-    timeout { fail "program's screen switch did not reach the terminal" }
+    -re "\x1b\\\[\\?1049\[hl\]" { fail "program's screen switch reached the terminal" }
+    -re "\nAC\r" {}
+    timeout { fail "output around screen switches was lost" }
 }
 expect "PROMPT>"
+# The wheel scrolls back through the session's scrollback (pear turns mouse
+# reporting on for that), and typing returns to the live screen.
 send "i=0; while \[ \$i -lt 300 \]; do echo hist-\$i; i=\$((i+1)); done\r"
 expect "hist-299\r"
 expect "PROMPT>"
-send "\001d"
-expect "detached from s1"
-wait
-spawn $pear attach s1
+send "\x1b\[<64;1;1M\x1b\[<64;1;1M\x1b\[<64;1;1M"
 expect {
-    -re "hist-0\r.*hist-299\r" {}
-    timeout { fail "scrollback not restored on reattach" }
+    -re "\x1b\\\[\\?6l\x1b\\\[H\x1b\\\[2J\x1b\\\[0mhist-2\[0-9\]\[0-9\]\r\n" {}
+    timeout { fail "the wheel did not scroll back" }
+}
+send "\r"
+expect {
+    -re "\x1b\\\[\\?1000h\x1b\\\[\\?1006h.*PROMPT>" {}
+    timeout { fail "typing did not return to the live screen" }
 }
 send "exit\r"
 expect "exited with status 0"

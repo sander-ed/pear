@@ -30,13 +30,16 @@ pub fn attach(sock_path: &str, detach_key: &[u8]) -> io::Result<Outcome> {
     sys::write_all(sock, &proto::encode_size(proto::C_HELLO, size))?;
 
     let raw = RawMode::enable(tty_in)?;
+    // Show the session on the alternate screen, so leaving it brings back the
+    // user's terminal exactly as it was (like tmux).
+    sys::write_all(tty_out, term::ENTER_SCREEN)?;
     let result = run_loop(sock, sig_fd, tty_in, tty_out, detach_key);
     sys::close(sock);
     sys::close(sig_fd);
 
-    // Leave the user's terminal usable regardless of what the program was doing,
-    // and make sure our message starts on a fresh line.
-    let _ = sys::write_all(tty_out, term::sane_terminal());
+    // Undo whatever modes the program set and go back to the user's screen,
+    // then make sure our message starts on a fresh line.
+    let _ = sys::write_all(tty_out, &term::leave_screen());
     if cursor_column(tty_in, tty_out) != Some(1) {
         let _ = sys::write_all(tty_out, b"\r\n");
     }

@@ -41,11 +41,14 @@ Like tmux, a bare `pear` takes the lowest free number, so with sessions `1`
 and `3` running the next one is `2`. When `pear` is not run in a terminal
 (for example piped into another command), it lists sessions instead.
 
-Your terminal follows the program's screen: full-screen apps use the alternate
-screen, while shells and inline apps (like agent CLIs) stay on the normal screen,
-so your terminal's own scrollback and mouse wheel work. On reattach, the
-session's scrollback is replayed so you can scroll back through what happened
-while you were away.
+Sessions are shown on your terminal's alternate screen (like tmux), so
+detaching brings back your terminal exactly as it was. The session's history is
+kept by libghostty-vt, and the mouse wheel scrolls through it the way Ghostty
+does: programs that use the mouse get the wheel themselves, full-screen apps
+without mouse support get arrow keys, and everywhere else (shells, agent CLIs)
+the wheel scrolls back through the session's history, including what happened
+while you were away. Typing jumps back to the bottom. Because pear handles the
+mouse, select text with Shift+drag (Option+drag in iTerm2).
 
 `pear NAME -- CMD` types CMD into the session's shell as if you had, then
 attaches, so after CMD finishes you are left in that shell. With `-d` it only
@@ -108,8 +111,9 @@ Linux and macOS are both supported.
 server feeds every byte the program writes into a libghostty-vt terminal
 (scrollback capped at 10 MB, Ghostty's default) and forwards it to any attached
 client over a unix socket. On attach, the server asks libghostty-vt to serialize
-the scrollback and current screen (contents, styles, cursor, alternate screen, mouse and
-paste modes, ...) as VT sequences and sends that first. Resizes are propagated with
+the current screen (contents, styles, cursor, mouse and paste modes, ...) as
+VT sequences and sends that first; when you scroll back, it repaints the
+scrolled-to part of the history the same way. Resizes are propagated with
 `TIOCSWINSZ`. While nobody is attached the server answers terminal queries (DSR,
 DA) itself so programs don't hang. A client that falls more than 4 MB behind
 (a slow SSH link during heavy output) skips the backlog and gets a fresh screen

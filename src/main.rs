@@ -13,7 +13,7 @@ mod server;
 mod sys;
 mod term;
 
-use std::io;
+use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 use std::process::exit;
 
@@ -50,8 +50,14 @@ Sockets live in $XDG_RUNTIME_DIR/pear or /tmp/pear-UID (override with PEAR_DIR).
 ";
 
 fn die(msg: impl std::fmt::Display) -> ! {
-    eprintln!("pear: {msg}");
+    say(format_args!("pear: {msg}"));
     exit(1)
+}
+
+/// Print a status line with a single write, so whoever reads the terminal
+/// gets it whole (`eprintln!` writes the pieces separately).
+fn say(msg: std::fmt::Arguments) {
+    let _ = io::stderr().write_all(format!("{msg}\n").as_bytes());
 }
 
 #[derive(Default)]
@@ -331,15 +337,15 @@ fn same_file(a: &str, b: &str) -> bool {
 fn run_attach(path: &str, name: &str, detach_key: &[u8]) -> i32 {
     match client::attach(path, detach_key) {
         Ok(client::Outcome::Detached) => {
-            eprintln!("[detached from {name}]");
+            say(format_args!("[detached from {name}]"));
             0
         }
         Ok(client::Outcome::Exited(status)) => {
-            eprintln!("[{name} exited with status {status}]");
+            say(format_args!("[{name} exited with status {status}]"));
             status
         }
         Ok(client::Outcome::ServerGone) => {
-            eprintln!("[{name} is gone]");
+            say(format_args!("[{name} is gone]"));
             1
         }
         Err(e) => die(format!("attach: {e}")),
@@ -354,7 +360,7 @@ fn cmd_kill(dir: &Path, name: &str) -> i32 {
     }
     match client::control(&path, proto::C_KILL) {
         Ok(_) => {
-            eprintln!("[killed {name}]");
+            say(format_args!("[killed {name}]"));
             0
         }
         Err(e) if e.kind() == io::ErrorKind::WouldBlock => {
@@ -398,7 +404,7 @@ fn cmd_send(dir: &Path, name: &str, cmd: &[String], detach_key: &[u8], detached:
     }
     if detached {
         let verb = if created { "created" } else { "sent to" };
-        eprintln!("[{verb} {name}: {}]", cmd.join(" "));
+        say(format_args!("[{verb} {name}: {}]", cmd.join(" ")));
         return 0;
     }
     run_attach(&path, name, detach_key)
@@ -453,10 +459,10 @@ fn cmd_new(
     };
 
     if detached {
-        eprintln!(
+        say(format_args!(
             "[created {name}; attach with `pear {name}`, detach with {}]",
             config::describe_key(detach_key)
-        );
+        ));
         return 0;
     }
     run_attach(&sock_path(dir, &name), &name, detach_key)
